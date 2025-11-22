@@ -6,6 +6,7 @@ use axum::{
     routing::get,
     Router,
 };
+use tower_http::cors::{CorsLayer, Any};
 use tokio::sync::broadcast;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{info, error};
@@ -50,12 +51,20 @@ async fn main() -> Result<()> {
         }
     });
     
+    // Configure CORS to allow frontend requests
+    let cors = CorsLayer::new()
+        .allow_origin(Any)  // Allow all origins (can be restricted to specific origins)
+        .allow_methods(Any)  // Allow all methods
+        .allow_headers(Any); // Allow all headers
+    
     // Build API routes
     let app = Router::new()
         // SSE endpoint for real-time updates
         .route("/api/sse/events", get(sse_events).with_state(tx.clone()))
         // REST endpoint for historical queries
-        .route("/api/events", get(get_recent_events).with_state(db_pool));
+        .route("/api/events", get(get_recent_events).with_state(db_pool))
+        // Add CORS layer
+        .layer(cors);
     
     // Start server
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));

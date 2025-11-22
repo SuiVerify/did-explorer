@@ -6,7 +6,7 @@ use axum::{
 use futures_util::stream::Stream;
 use std::convert::Infallible;
 use tokio::sync::broadcast;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::{info, error};
 
@@ -36,18 +36,49 @@ pub async fn sse_events(
     )
 }
 
+// Response format for REST API
+#[derive(Serialize)]
+pub struct EventsResponse {
+    pub success: bool,
+    pub data: Vec<DIDClaimedEvent>,
+    pub pagination: Pagination,
+}
+
+#[derive(Serialize)]
+pub struct Pagination {
+    pub limit: i64,
+    pub offset: i64,
+    pub total: i64,
+    pub has_more: bool,
+}
+
 // REST endpoint - for historical queries from PostgreSQL
 #[derive(Deserialize)]
 pub struct EventQuery {
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
     pub user_address: Option<String>,
 }
 
 pub async fn get_recent_events(
     State(db): State<PgPool>,
     Query(params): Query<EventQuery>,
-) -> Json<Vec<DIDClaimedEvent>> {
+) -> Json<EventsResponse> {
     let limit = params.limit.unwrap_or(20);
+    let offset = params.offset.unwrap_or(0);
+    
+    // Get total count
+    let total_result = sqlx::query!("SELECT COUNT(*) as count FROM did_claimed_events")
+        .fetch_one(&db)
+        .await;
+    
+    let total = match total_result {
+        Ok(row) => row.count.unwrap_or(0),
+        Err(e) => {
+            error!("Failed to get total count: {}", e);
+            0
+        }
+    };
     
     let query_result = if let Some(user_addr) = params.user_address {
         sqlx::query_as!(
@@ -62,10 +93,11 @@ pub async fn get_recent_events(
             FROM did_claimed_events
             WHERE user_address = $1
             ORDER BY timestamp_ms DESC
-            LIMIT $2
+            LIMIT $2 OFFSET $3
             "#,
             user_addr,
-            limit
+            limit,
+            offset
         )
         .fetch_all(&db)
         .await
@@ -81,9 +113,10 @@ pub async fn get_recent_events(
                 event_index
             FROM did_claimed_events
             ORDER BY timestamp_ms DESC
-            LIMIT $1
+            LIMIT $1 OFFSET $2
             "#,
-            limit
+            limit,
+            offset
         )
         .fetch_all(&db)
         .await
@@ -97,5 +130,17 @@ pub async fn get_recent_events(
         }
     };
     
-    Json(events)
+    let count = events.len() as i64;
+    let has_more = offset + count < total;
+    
+    Json(EventsResponse {
+        success: true,
+        data: events,
+        pagination: Pagination {
+            limit,
+            offset,
+            total,
+            has_more,
+        },
+    })
 }
